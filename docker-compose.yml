@@ -4,33 +4,57 @@ services:
     environment:
       POSTGRES_DB: imposter_shield
       POSTGRES_USER: shield
-      POSTGRES_PASSWORD: change_me
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
     volumes:
       - pgdata:/var/lib/postgresql/data
-    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shield -d imposter_shield"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
 
   redis:
     image: redis:7
-    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
 
   api:
     build: .
     command: uvicorn imposter_shield.api:app --host 0.0.0.0 --port 8000
     environment:
-      DATABASE_URL: postgresql+psycopg2://shield:change_me@db:5432/imposter_shield
-      REDIS_URL: redis://redis:6379/0
-    depends_on: [db, redis]
+      # Note the ISHLD_ prefix — pydantic-settings reads ISHLD_* (see config.py).
+      ISHLD_ENVIRONMENT: production
+      ISHLD_SECRET_KEY: ${ISHLD_SECRET_KEY:?set ISHLD_SECRET_KEY in .env}
+      ISHLD_DATABASE_URL: postgresql+psycopg2://shield:${POSTGRES_PASSWORD}@db:5432/imposter_shield
+      ISHLD_CELERY_BROKER_URL: redis://redis:6379/0
+      ISHLD_CELERY_RESULT_BACKEND: redis://redis:6379/1
+      ISHLD_ALLOWED_HOSTS: ${ISHLD_ALLOWED_HOSTS:?comma-set your domain(s)}
+      ISHLD_CORS_ORIGINS: ${ISHLD_CORS_ORIGINS:?set your https origin(s)}
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_healthy }
     ports: ["8000:8000"]
+    restart: unless-stopped
 
   worker:
     build: .
     # Verification + evidence assembly only. This worker never submits reports.
-    command: celery -A imposter_shield.worker.celery_app worker --loglevel=info
+    command: celery -A imposter_shield.worker.celery_app worker --loglevel=info --time-limit=360
     environment:
-      DATABASE_URL: postgresql+psycopg2://shield:change_me@db:5432/imposter_shield
-      REDIS_URL: redis://redis:6379/0
-      # SERPAPI_KEY / VT_API_KEY injected via secrets in real deployments
-    depends_on: [db, redis]
+      ISHLD_SECRET_KEY: ${ISHLD_SECRET_KEY}
+      ISHLD_DATABASE_URL: postgresql+psycopg2://shield:${POSTGRES_PASSWORD}@db:5432/imposter_shield
+      ISHLD_CELERY_BROKER_URL: redis://redis:6379/0
+      ISHLD_CELERY_RESULT_BACKEND: redis://redis:6379/1
+      # ISHLD_SERPAPI_KEY / ISHLD_VT_API_KEY injected via secrets in real deployments
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
 
   # NOTE: there is intentionally no headless "reporter" service.
   # Report submission runs attended (report_assistant.prefill_and_handoff) on a

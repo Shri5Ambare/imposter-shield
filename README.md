@@ -118,14 +118,20 @@ and lock `ISHLD_CORS_ORIGINS` / `ISHLD_ALLOWED_HOSTS` to your domain.
 | Control | Implementation |
 |---------|----------------|
 | Authentication | JWT bearer, bcrypt-hashed passwords (`security/auth.py`) |
+| Token revocation | `token_version` claim; bumped on logout / disable / delete / password+role change, invalidating outstanding tokens without a blacklist |
 | Authorization | Role-based (`admin`/`reviewer`/`viewer`) + per-identity ownership checks; 404 (not 403) on others' resources to avoid existence leaks |
-| Input validation | Pydantic everywhere; `HttpUrl` for URLs; bounded string lengths; min-12-char passwords |
+| Input validation | Pydantic everywhere; `HttpUrl` + public-URL guard; `Platform` enum; bounded string + metadata sizes; min-12-char passwords |
+| SSRF protection | `security/net.py` resolves and blocks loopback/private/link-local/reserved targets for every server-fetched URL (suspect, evidence, worker images) |
 | Injection | SQLAlchemy ORM only — no string-built SQL; output HTML-escaped in the SPA |
-| Rate limiting | slowapi; login throttled harder (brute-force resistance) |
-| Transport/UI | Strict CSP (`script-src 'self'`), `X-Frame-Options: DENY`, HSTS, nosniff, locked CORS + TrustedHost |
-| Secrets | Env-only; loud warning when running on an ephemeral key |
-| Auditability | Every state change writes an immutable `ActionLog` row with actor + detail |
+| Rate limiting | slowapi on auth (hard) and all write/expensive endpoints (`rate_limit_write`) |
+| Transport/UI | Strict CSP (`script-src 'self'`), `X-Frame-Options: DENY`, HSTS, nosniff, COOP/CORP, `Cache-Control: no-store` on `/api/*`, locked CORS + TrustedHost |
+| Secrets | Env-only; **fails closed** in production (refuses to boot with ephemeral key or wildcard hosts) |
+| Auditability | Case actions → immutable `ActionLog`; auth + admin events (incl. failed logins) → `AuditEvent`, both queryable |
+| Ingestion safety | Worker enforces image size caps (streamed), content-type allowlist, and PIL decode validation |
 | Abuse prevention | No automated submission; no bot-detection bypass; submission attributed to a named human |
+
+Tests: `pip install -r requirements-dev.txt && pytest -q` covers the classifier,
+scoring fusion, claim routing, and the SSRF guard (no DB/network/ML needed).
 
 ## Harm coverage (money + defamation)
 

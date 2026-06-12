@@ -26,8 +26,19 @@ class SignalInputs:
 # A watermark hit is near-dispositive: it means *your* pixels (with your secret
 # mark) are on an account that isn't yours. It gets a large additive boost rather
 # than a weight, because it's evidence of theft, not a soft similarity.
-WEIGHTS = {"face": 0.45, "text": 0.20, "heuristics": 0.35}
-WATERMARK_BOOST = 0.40
+# Defaults live here; runtime values come from settings so they can be tuned
+# without a code change (see config.score_weight_* / watermark_boost).
+try:
+    from ..config import settings as _settings
+    WEIGHTS = {
+        "face": _settings.score_weight_face,
+        "text": _settings.score_weight_text,
+        "heuristics": _settings.score_weight_heuristics,
+    }
+    WATERMARK_BOOST = _settings.watermark_boost
+except Exception:  # noqa: BLE001 - keep core importable without settings
+    WEIGHTS = {"face": 0.45, "text": 0.20, "heuristics": 0.35}
+    WATERMARK_BOOST = 0.40
 
 
 @dataclass

@@ -20,20 +20,20 @@ import tempfile
 from pathlib import Path
 
 import requests
-from celery import shared_task
 from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..core import classifier, scoring, verification
-from ..core.watermark import compare_phash, extract_watermark, phash
+from ..core.watermark import compare_phash, extract_watermark
 from ..db.models import ActionLog, CaseStatus, HarmEvidence, HarmKind, ScoreRecord, Suspect
 from ..db.session import SessionLocal
+from ..security.net import UnsafeURLError, validate_public_url
 from .celery_app import celery_app
 
 log = logging.getLogger(__name__)
 
-_REQUEST_TIMEOUT = 15   # seconds per image download
+_ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/jpg", "image/png", "image/webp"}
 
 
 # --------------------------------------------------------------------------- #
@@ -50,19 +50,55 @@ def _log(db: Session, suspect_id: int, action: str, detail: dict) -> None:
 
 
 def _fetch_image(url: str, dest_dir: str) -> str | None:
-    """Download an image URL into dest_dir, return local path or None on error."""
+    """Safely download an image URL into dest_dir; return local path or None.
+
+    Defends against SSRF (validate_public_url blocks private/loopback targets and
+    non-http schemes), oversized responses (Content-Length + streamed byte cap),
+    wrong content types, and non-image payloads (PIL.verify on the result).
+    """
     try:
-        resp = requests.get(url, timeout=_REQUEST_TIMEOUT, stream=True)
+        validate_public_url(url)
+    except UnsafeURLError as exc:
+        log.warning("Refusing to fetch unsafe URL %s: %s", url, exc)
+        return None
+
+    try:
+        resp = requests.get(url, timeout=settings.image_download_timeout, stream=True)
         resp.raise_for_status()
-        ext = ".jpg"
-        ct = resp.headers.get("content-type", "")
-        if "png" in ct:
-            ext = ".png"
-        name = Path(url).stem[:40] + ext
-        dest = os.path.join(dest_dir, name)
+
+        ct = resp.headers.get("content-type", "").split(";")[0].strip().lower()
+        if ct and ct not in _ALLOWED_IMAGE_TYPES:
+            log.warning("Skipping %s: disallowed content-type %s", url, ct)
+            return None
+
+        declared = resp.headers.get("content-length")
+        if declared and int(declared) > settings.image_max_bytes:
+            log.warning("Skipping %s: declared size %s exceeds cap", url, declared)
+            return None
+
+        ext = ".png" if ct == "image/png" else (".webp" if ct == "image/webp" else ".jpg")
+        dest = os.path.join(dest_dir, Path(url).stem[:40] + ext)
+
+        written = 0
         with open(dest, "wb") as fh:
             for chunk in resp.iter_content(8192):
+                written += len(chunk)
+                if written > settings.image_max_bytes:    # enforce even if Content-Length lied
+                    log.warning("Aborting %s: exceeded byte cap mid-stream", url)
+                    fh.close()
+                    os.unlink(dest)
+                    return None
                 fh.write(chunk)
+
+        # Confirm it's actually a decodable image, not an HTML error page, etc.
+        try:
+            from PIL import Image
+            with Image.open(dest) as im:
+                im.verify()
+        except Exception:  # noqa: BLE001
+            log.warning("Skipping %s: not a valid image", url)
+            os.unlink(dest)
+            return None
         return dest
     except Exception as exc:  # noqa: BLE001
         log.warning("Could not fetch image %s: %s", url, exc)
@@ -76,6 +112,9 @@ def _fetch_image(url: str, dest_dir: str) -> str | None:
 @celery_app.task(
     bind=True,
     max_retries=2,
+    retry_backoff=True,         # exponential: 30s, 60s, ... up to the cap
+    retry_backoff_max=300,
+    retry_jitter=True,          # spread retries to avoid thundering herd
     default_retry_delay=30,
     name="imposter_shield.verify_suspect",
 )
@@ -206,8 +245,8 @@ def verify_suspect(
             })
             suspect.metadata_json = md
 
-            harm_kinds = {h.kind.value for h in db.query(
-                HarmEvidence).filter(HarmEvidence.suspect_id == suspect_id).all()}
+            db.flush()  # ensure any worker-added harm row is visible via the relationship
+            harm_kinds = {h.kind.value for h in suspect.harm}
             if bio_labels.primary_harm:
                 harm_kinds.add(bio_labels.primary_harm)
 

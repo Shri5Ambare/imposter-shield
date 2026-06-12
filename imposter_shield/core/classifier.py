@@ -52,11 +52,16 @@ class Classification:
         return top if score > 0 else None
 
 
-def _scan(text: str, patterns: list[str]) -> list[str]:
+# Pre-compile once at import — _scan runs on every classified message.
+_FINANCIAL_RE = [re.compile(p, re.IGNORECASE) for p in _FINANCIAL]
+_DEFAMATION_RE = [re.compile(p, re.IGNORECASE) for p in _DEFAMATION]
+_URGENCY_RE = [re.compile(p, re.IGNORECASE) for p in _URGENCY]
+
+
+def _scan(text: str, patterns: list[re.Pattern]) -> list[str]:
     hits: list[str] = []
     for pat in patterns:
-        for m in re.finditer(pat, text, flags=re.IGNORECASE):
-            hits.append(m.group(0))
+        hits.extend(m.group(0) for m in pat.finditer(text))
     return hits
 
 
@@ -64,9 +69,9 @@ def classify(text: str) -> Classification:
     if not text or not text.strip():
         return Classification()
 
-    fin = _scan(text, _FINANCIAL)
-    def_ = _scan(text, _DEFAMATION)
-    urg = _scan(text, _URGENCY)
+    fin = _scan(text, _FINANCIAL_RE)
+    def_ = _scan(text, _DEFAMATION_RE)
+    urg = _scan(text, _URGENCY_RE)
 
     def score(hits: list[str]) -> float:
         # Saturating: 1 hit -> 0.6, 2 -> 0.85, 3+ -> ~1.0.

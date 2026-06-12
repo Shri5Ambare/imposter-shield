@@ -83,6 +83,11 @@ async function doLogin(e) {
 }
 
 function logout() {
+  // Best-effort server-side revocation (bumps token_version); ignore failures
+  // since we clear local state regardless.
+  if (token) {
+    fetch(API + "/auth/logout", { method: "POST", headers: authHeaders() }).catch(() => {});
+  }
   token = null; currentUser = null;
   sessionStorage.removeItem("ishld_token");
   document.getElementById("app-view").hidden = true;

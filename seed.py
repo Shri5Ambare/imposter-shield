@@ -58,12 +58,22 @@ def main() -> None:
             classifier_labels={},
         ))
         db.commit()
-        print("=" * 56)
-        print("Seed complete.")
-        print(f"  Admin login : admin@local")
-        print(f"  Password    : {admin_pw}")
-        print("  Open        : http://localhost:8000/")
-        print("=" * 56)
+
+        # Print credentials to STDERR (not stdout) so they don't get captured by
+        # log pipelines/redirects as readily. If the operator supplied the
+        # password via env, don't echo it back at all.
+        import sys
+        supplied = "ISHLD_ADMIN_PASSWORD" in os.environ
+        print("=" * 60, file=sys.stderr)
+        print("Seed complete.", file=sys.stderr)
+        print("  Admin login : admin@local", file=sys.stderr)
+        if supplied:
+            print("  Password    : (as provided in ISHLD_ADMIN_PASSWORD)", file=sys.stderr)
+        else:
+            print(f"  Password    : {admin_pw}", file=sys.stderr)
+            print("  ^ Store this now and change it after first login.", file=sys.stderr)
+        print("  Open        : http://localhost:8000/", file=sys.stderr)
+        print("=" * 60, file=sys.stderr)
     finally:
         db.close()
 

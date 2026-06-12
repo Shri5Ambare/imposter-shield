@@ -34,7 +34,9 @@ celery_app.conf.update(
     enable_utc=True,
     task_track_started=True,
     task_acks_late=True,           # don't ack until the task finishes — safe retry on crash
+    task_reject_on_worker_lost=True,  # requeue if the worker is killed mid-task
     worker_prefetch_multiplier=1,  # one task at a time; face-match is CPU-heavy
-    task_soft_time_limit=120,      # 2 min: should be plenty for a single candidate
-    task_time_limit=180,
+    # Image downloads + DeepFace on CPU-only hosts can be slow; give headroom.
+    task_soft_time_limit=300,      # 5 min soft (raises SoftTimeLimitExceeded -> graceful)
+    task_time_limit=360,           # 6 min hard kill
 )

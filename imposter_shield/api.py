@@ -14,12 +14,15 @@ Celery integration:
   - verify_suspect task is dispatched after every create_suspect call.
   - If no broker is configured the task call is silently skipped (CELERY_AVAILABLE
     flag); the API still works, scoring just happens synchronously via /score.
-"""
-from __future__ import annotations
 
+NOTE: this module deliberately does NOT use `from __future__ import annotations`.
+Stringized annotations break FastAPI's signature resolution for endpoints wrapped
+by slowapi's @limiter.limit (forward refs like OAuth2PasswordRequestForm can't be
+resolved through the wrapper). Keep annotations concrete here.
+"""
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.responses import FileResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.staticfiles import StaticFiles
@@ -35,7 +38,8 @@ from .config import settings
 from .core import classifier, scoring, verification
 from .core.dossier import DossierData, build_dossier
 from .db.models import (
-    ActionLog, CaseStatus, HarmEvidence, ProtectedIdentity, Role, ScoreRecord, Suspect, User,
+    ActionLog, AuditEvent, CaseStatus, HarmEvidence, ProtectedIdentity, Role,
+    ScoreRecord, Suspect, User,
 )
 from .db.session import get_db, init_db
 from .reporting import claim_router
@@ -53,16 +57,23 @@ except Exception:  # noqa: BLE001
     CELERY_AVAILABLE = False
 
 
-def _dispatch_verify(suspect_id: int, identity: ProtectedIdentity) -> str | None:
-    """Enqueue the async face-match task. Returns task_id or None if skipped."""
+def _dispatch_verify(suspect: Suspect, identity: ProtectedIdentity) -> str | None:
+    """Enqueue the async face-match task. Returns task_id or None if skipped.
+
+    Image URLs are read from suspect/identity metadata; the worker validates each
+    one against the SSRF guard before fetching.
+    """
     if not CELERY_AVAILABLE or _celery_verify is None:
         return None
+    md = suspect.metadata_json or {}
+    ident_md = identity.handles or {}
     try:
         result = _celery_verify.delay(
-            suspect_id=suspect_id,
-            truth_image_paths=[],       # operator populates via metadata or future upload endpoint
-            truth_image_urls=[],
-            suspect_image_urls=[],      # populated from suspect.metadata_json["image_urls"] if present
+            suspect_id=suspect.id,
+            truth_image_paths=[],
+            truth_image_urls=list(ident_md.get("_truth_image_urls", []))
+                if isinstance(ident_md, dict) else [],
+            suspect_image_urls=list(md.get("image_urls", [])),
         )
         return result.id
     except Exception:  # noqa: BLE001 — broker unavailable; degrade silently
@@ -74,10 +85,10 @@ app.state.limiter = limiter
 
 # --- middleware (order matters: outermost first) -------------------------- #
 app.add_middleware(SecurityHeadersMiddleware)
-app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.allowed_hosts)
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.allowed_hosts_list)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins,
+    allow_origins=settings.cors_origins_list,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PATCH", "DELETE"],
     allow_headers=["Authorization", "Content-Type"],
@@ -101,6 +112,24 @@ def _startup() -> None:
 
 def _log(db: Session, suspect_id: int, action: str, actor: str, detail: dict | None = None) -> None:
     db.add(ActionLog(suspect_id=suspect_id, action=action, actor=actor, detail=detail or {}))
+
+
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else ""
+
+
+def _audit(db: Session, request: Request, category: str, action: str, *,
+           actor: str = "", target: str = "", detail: dict | None = None) -> None:
+    """Record a non-case event (auth / admin) to the AuditEvent table.
+
+    Fields are truncated to their column limits so a hostile, oversized login
+    username can't raise a DB error and disrupt the request.
+    """
+    db.add(AuditEvent(
+        category=category[:40], action=action[:60],
+        actor=(actor or "")[:200], target=(target or "")[:200],
+        source_ip=_client_ip(request)[:64], detail=detail or {},
+    ))
 
 
 def _owned_identity(db: Session, identity_id: int, user: User) -> ProtectedIdentity:
@@ -130,10 +159,27 @@ def login(request: Request, form: OAuth2PasswordRequestForm = Depends(),
     user = db.query(User).filter(User.email == form.username).first()
     # Constant-ish path: verify even when user missing to blunt user enumeration.
     if user is None or not verify_password(form.password, user.hashed_password):
+        _audit(db, request, "auth", "login_failed", actor=form.username,
+               detail={"reason": "bad_credentials"})
+        db.commit()
         raise HTTPException(401, "Incorrect email or password")
     if not user.is_active:
+        _audit(db, request, "auth", "login_denied", actor=user.email,
+               detail={"reason": "account_disabled"})
+        db.commit()
         raise HTTPException(403, "Account disabled")
-    return schemas.Token(access_token=create_access_token(user.email, user.role.value))
+    _audit(db, request, "auth", "login_ok", actor=user.email)
+    db.commit()
+    return schemas.Token(access_token=create_access_token(user))
+
+
+@app.post("/api/auth/logout", status_code=204)
+def logout(request: Request, db: Session = Depends(get_db),
+           user: User = Depends(get_current_user)):
+    """Revoke all of the caller's outstanding tokens by bumping token_version."""
+    user.token_version += 1
+    _audit(db, request, "auth", "logout", actor=user.email)
+    db.commit()
 
 
 @app.get("/api/me", response_model=schemas.UserOut)
@@ -142,8 +188,8 @@ def me(user: User = Depends(get_current_user)):
 
 
 @app.post("/api/users", response_model=schemas.UserOut, status_code=201)
-def create_user(payload: schemas.UserCreate, db: Session = Depends(get_db),
-                _: User = Depends(require_role(Role.admin))):
+def create_user(request: Request, payload: schemas.UserCreate, db: Session = Depends(get_db),
+                actor: User = Depends(require_role(Role.admin))):
     if db.query(User).filter(User.email == payload.email).first():
         raise HTTPException(409, "Email already registered")
     user = User(
@@ -151,6 +197,8 @@ def create_user(payload: schemas.UserCreate, db: Session = Depends(get_db),
         hashed_password=hash_password(payload.password), role=payload.role,
     )
     db.add(user)
+    _audit(db, request, "admin", "user_created", actor=actor.email,
+           target=payload.email, detail={"role": payload.role.value})
     db.commit()
     db.refresh(user)
     return user
@@ -158,40 +206,58 @@ def create_user(payload: schemas.UserCreate, db: Session = Depends(get_db),
 
 @app.get("/api/users", response_model=list[schemas.UserOut])
 def list_users(db: Session = Depends(get_db),
-               _: User = Depends(require_role(Role.admin))):
-    return db.query(User).order_by(User.created_at.desc()).all()
+               _: User = Depends(require_role(Role.admin)),
+               limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)):
+    return (db.query(User).order_by(User.created_at.desc())
+            .offset(offset).limit(limit).all())
 
 
 @app.patch("/api/users/{user_id}", response_model=schemas.UserOut)
-def update_user(user_id: int, payload: schemas.UserUpdate, db: Session = Depends(get_db),
+def update_user(request: Request, user_id: int, payload: schemas.UserUpdate,
+                db: Session = Depends(get_db),
                 actor: User = Depends(require_role(Role.admin))):
     target = db.get(User, user_id)
     if target is None:
         raise HTTPException(404, "User not found")
     if target.id == actor.id and payload.role is not None and payload.role != Role.admin:
         raise HTTPException(400, "Cannot demote your own admin account")
-    if payload.role is not None:
+    if target.id == actor.id and payload.is_active is False:
+        raise HTTPException(400, "Cannot disable your own account")
+
+    changed = []
+    if payload.role is not None and payload.role != target.role:
         target.role = payload.role
-    if payload.is_active is not None:
+        changed.append("role")
+    if payload.is_active is not None and payload.is_active != target.is_active:
         target.is_active = payload.is_active
+        changed.append("is_active")
     if payload.full_name is not None:
         target.full_name = payload.full_name
+        changed.append("full_name")
     if payload.password is not None:
         target.hashed_password = hash_password(payload.password)
+        changed.append("password")
+    # Any security-relevant change revokes the target's existing tokens.
+    if {"role", "is_active", "password"} & set(changed):
+        target.token_version += 1
+    _audit(db, request, "admin", "user_updated", actor=actor.email,
+           target=target.email, detail={"changed": changed})
     db.commit()
     db.refresh(target)
     return target
 
 
 @app.delete("/api/users/{user_id}", status_code=204)
-def delete_user(user_id: int, db: Session = Depends(get_db),
+def delete_user(request: Request, user_id: int, db: Session = Depends(get_db),
                 actor: User = Depends(require_role(Role.admin))):
     target = db.get(User, user_id)
     if target is None:
         raise HTTPException(404, "User not found")
     if target.id == actor.id:
         raise HTTPException(400, "Cannot delete your own account")
+    email = target.email
     db.delete(target)
+    _audit(db, request, "admin", "user_deleted", actor=actor.email, target=email)
     db.commit()
 
 
@@ -221,17 +287,19 @@ def list_identities(db: Session = Depends(get_db), user: User = Depends(get_curr
 # =============================================================== SUSPECTS
 
 @app.post("/api/suspects", response_model=schemas.SuspectOut, status_code=201)
-def create_suspect(payload: schemas.SuspectCreate, db: Session = Depends(get_db),
+@limiter.limit(settings.rate_limit_write)
+def create_suspect(request: Request, payload: schemas.SuspectCreate,
+                   db: Session = Depends(get_db),
                    user: User = Depends(require_role(Role.admin, Role.reviewer))):
     ident = _owned_identity(db, payload.identity_id, user)
     s = Suspect(
-        identity_id=payload.identity_id, platform=payload.platform, url=str(payload.url),
+        identity_id=payload.identity_id, platform=payload.platform.value, url=str(payload.url),
         handle=payload.handle, bio=payload.bio, metadata_json=payload.metadata,
         discovered_via=payload.discovered_via,
     )
     db.add(s)
     db.flush()
-    task_id = _dispatch_verify(s.id, ident)
+    task_id = _dispatch_verify(s, ident)
     _log(db, s.id, "suspect_created", user.email,
          {"url": str(payload.url), "async_task_id": task_id,
           "async_available": CELERY_AVAILABLE})
@@ -241,7 +309,8 @@ def create_suspect(payload: schemas.SuspectCreate, db: Session = Depends(get_db)
 
 
 @app.post("/api/suspects/{suspect_id}/score", response_model=schemas.ScoreOut)
-def score_suspect(suspect_id: int, db: Session = Depends(get_db),
+@limiter.limit(settings.rate_limit_write)
+def score_suspect(request: Request, suspect_id: int, db: Session = Depends(get_db),
                   user: User = Depends(require_role(Role.admin, Role.reviewer))):
     """Run NLP + heuristic + harm signals and persist a score.
 
@@ -288,13 +357,14 @@ def score_suspect(suspect_id: int, db: Session = Depends(get_db),
 
 @app.get("/api/cases", response_model=list[schemas.SuspectOut])
 def list_cases(status_filter: CaseStatus | None = None, db: Session = Depends(get_db),
-               user: User = Depends(get_current_user)):
+               user: User = Depends(get_current_user),
+               limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0)):
     q = db.query(Suspect).join(ProtectedIdentity)
     if user.role != Role.admin:
         q = q.filter(ProtectedIdentity.owner_user_id == user.id)
     if status_filter:
         q = q.filter(Suspect.status == status_filter)
-    return q.order_by(Suspect.discovered_at.desc()).all()
+    return q.order_by(Suspect.discovered_at.desc()).offset(offset).limit(limit).all()
 
 
 @app.get("/api/cases/{suspect_id}", response_model=schemas.CaseDetail)
@@ -316,8 +386,19 @@ def case_detail(suspect_id: int, db: Session = Depends(get_db),
     return detail
 
 
+@app.get("/api/cases/{suspect_id}/audit", response_model=list[schemas.ActionLogOut])
+def case_audit(suspect_id: int, db: Session = Depends(get_db),
+               user: User = Depends(get_current_user),
+               limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0)):
+    s = _owned_suspect(db, suspect_id, user)
+    return (db.query(ActionLog).filter(ActionLog.suspect_id == s.id)
+            .order_by(ActionLog.at.desc()).offset(offset).limit(limit).all())
+
+
 @app.patch("/api/cases/{suspect_id}/status", response_model=schemas.SuspectOut)
-def update_status(suspect_id: int, payload: schemas.StatusUpdate, db: Session = Depends(get_db),
+@limiter.limit(settings.rate_limit_write)
+def update_status(request: Request, suspect_id: int, payload: schemas.StatusUpdate,
+                  db: Session = Depends(get_db),
                   user: User = Depends(require_role(Role.admin, Role.reviewer))):
     s = _owned_suspect(db, suspect_id, user)
     prev = s.status
@@ -335,7 +416,9 @@ def update_status(suspect_id: int, payload: schemas.StatusUpdate, db: Session = 
 # ============================================================ HARM EVIDENCE
 
 @app.post("/api/cases/{suspect_id}/harm", response_model=schemas.HarmEvidenceOut, status_code=201)
-def add_harm(suspect_id: int, payload: schemas.HarmEvidenceCreate, db: Session = Depends(get_db),
+@limiter.limit(settings.rate_limit_write)
+def add_harm(request: Request, suspect_id: int, payload: schemas.HarmEvidenceCreate,
+             db: Session = Depends(get_db),
              user: User = Depends(require_role(Role.admin, Role.reviewer))):
     s = _owned_suspect(db, suspect_id, user)
     labels = classifier.classify(payload.captured_text or payload.description)
@@ -358,14 +441,31 @@ def add_harm(suspect_id: int, payload: schemas.HarmEvidenceCreate, db: Session =
 
 # ================================================================== DOSSIER
 
+def _prune_old_dossiers() -> None:
+    """Delete generated PDFs older than the retention window."""
+    import time
+    out = Path(settings.out_dir)
+    if not out.exists():
+        return
+    cutoff = time.time() - settings.dossier_retention_days * 86400
+    for pdf in out.glob("dossier-*.pdf"):
+        try:
+            if pdf.stat().st_mtime < cutoff:
+                pdf.unlink()
+        except OSError:
+            pass
+
+
 @app.post("/api/cases/{suspect_id}/dossier")
-def generate_dossier(suspect_id: int, db: Session = Depends(get_db),
+@limiter.limit(settings.rate_limit_write)
+def generate_dossier(request: Request, suspect_id: int, db: Session = Depends(get_db),
                      user: User = Depends(require_role(Role.admin, Role.reviewer))):
     s = _owned_suspect(db, suspect_id, user)
     ident = db.get(ProtectedIdentity, s.identity_id)
     latest = (db.query(ScoreRecord).filter(ScoreRecord.suspect_id == s.id)
               .order_by(ScoreRecord.scored_at.desc()).first())
     Path(settings.out_dir).mkdir(parents=True, exist_ok=True)
+    _prune_old_dossiers()
     out_path = str(Path(settings.out_dir) / f"dossier-{s.id}.pdf")
     harm_notes = [f"{h.kind.value}: {h.description}" for h in s.harm]
     build_dossier(
@@ -382,6 +482,14 @@ def generate_dossier(suspect_id: int, db: Session = Depends(get_db),
     _log(db, s.id, "dossier_built", user.email, {"path": out_path})
     db.commit()
     return FileResponse(out_path, media_type="application/pdf", filename=f"dossier-{s.id}.pdf")
+
+
+# ================================================================== HEALTH
+
+@app.get("/api/healthz")
+def healthz():
+    """Unauthenticated liveness probe for load balancers / container healthchecks."""
+    return {"status": "ok", "service": "imposter-shield", "env": settings.environment}
 
 
 # ============================================================= WORKER STATUS

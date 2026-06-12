@@ -10,7 +10,7 @@ import enum
 from datetime import datetime, timezone
 
 from sqlalchemy import (
-    String, Float, Boolean, DateTime, ForeignKey, JSON, Text, Enum as SAEnum,
+    String, Float, Boolean, DateTime, ForeignKey, Integer, JSON, Text, Enum as SAEnum,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -41,6 +41,11 @@ class User(Base):
     hashed_password: Mapped[str] = mapped_column(String(255))
     role: Mapped[Role] = mapped_column(SAEnum(Role), default=Role.reviewer)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Bumped whenever the user is disabled, deleted, has their password/role
+    # changed, or logs out. The value is embedded in issued JWTs; a token whose
+    # `ver` claim no longer matches is rejected. This gives stateless tokens a
+    # revocation path without a per-request blacklist lookup.
+    token_version: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
 
@@ -144,3 +149,19 @@ class ActionLog(Base):
     at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
     suspect: Mapped["Suspect"] = relationship(back_populates="actions")
+
+
+class AuditEvent(Base):
+    """Append-only audit for events not tied to a single case: authentication
+    (success/failure) and admin actions (user create/update/delete). Keeping
+    these here means brute-force attempts and privilege changes are queryable,
+    not just buried in process logs."""
+    __tablename__ = "audit_event"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    category: Mapped[str] = mapped_column(String(40), index=True)   # "auth" | "admin"
+    action: Mapped[str] = mapped_column(String(60))                 # "login_ok", "user_deleted", ...
+    actor: Mapped[str] = mapped_column(String(200), default="")     # who did it (email) or "anonymous"
+    target: Mapped[str] = mapped_column(String(200), default="")    # who/what it affected
+    source_ip: Mapped[str] = mapped_column(String(64), default="")
+    detail: Mapped[dict] = mapped_column(JSON, default=dict)
+    at: Mapped[datetime] = mapped_column(DateTime, default=_now)

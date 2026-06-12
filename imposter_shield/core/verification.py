@@ -39,8 +39,10 @@ def face_match(truth_image_paths: Sequence[str], suspect_image_path: str) -> Fac
     needs to have stolen one of the protected person's photos. DeepFace handles
     detection + alignment + embedding internally.
     """
+    import logging
     from deepface import DeepFace  # imported lazily; heavy + optional at import time
 
+    log = logging.getLogger(__name__)
     best: FaceSignal | None = None
     for truth_path in truth_image_paths:
         try:
@@ -51,8 +53,11 @@ def face_match(truth_image_paths: Sequence[str], suspect_image_path: str) -> Fac
                 distance_metric=_FACE_METRIC,
                 enforce_detection=False,   # suspect crops are often messy
             )
-        except Exception as exc:  # noqa: BLE001 - a bad image must not kill the job
-            best = best or FaceSignal(0.0, False, 1.0, 0.0, _FACE_MODEL, f"error: {exc}")
+        except Exception:  # noqa: BLE001 - a bad image must not kill the job
+            # Log full detail server-side; keep the caller-visible note generic so
+            # file paths / model internals don't leak into stored breakdowns.
+            log.warning("Face verify failed for a reference image", exc_info=True)
+            best = best or FaceSignal(0.0, False, 1.0, 0.0, _FACE_MODEL, "face match unavailable")
             continue
 
         distance = float(result["distance"])
