@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ImposterShield</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <!-- Login -->
+  <div id="login-view" class="login-wrap">
+    <form id="login-form" class="login-card" autocomplete="on">
+      <div class="brand"><span class="shield">&#128737;</span> ImposterShield</div>
+      <p class="tagline">Impersonation detection &amp; evidence assembly</p>
+      <label>Email<input type="email" id="email" required autocomplete="username" /></label>
+      <label>Password<input type="password" id="password" required autocomplete="current-password" /></label>
+      <button type="submit" class="btn primary">Sign in</button>
+      <div id="login-error" class="error" hidden></div>
+    </form>
+  </div>
+
+  <!-- App -->
+  <div id="app-view" hidden>
+    <header class="topbar">
+      <div class="brand sm"><span class="shield">&#128737;</span> ImposterShield</div>
+      <nav class="filters" id="status-filters">
+        <button data-status="" class="chip active">All</button>
+        <button data-status="new" class="chip">New</button>
+        <button data-status="in_review" class="chip">In review</button>
+        <button data-status="submitted" class="chip">Submitted</button>
+        <button data-status="dismissed" class="chip">Dismissed</button>
+      </nav>
+      <div class="user-box"><span id="user-label"></span>
+        <button id="logout" class="btn ghost">Sign out</button></div>
+    </header>
+
+    <main class="layout">
+      <section class="queue">
+        <h2>Review queue</h2>
+        <div id="case-list" class="case-list"></div>
+      </section>
+
+      <section class="detail" id="detail-panel">
+        <div class="empty">Select a case to review its evidence.</div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+  <script src="/app.js"></script>
+</body>
+</html>

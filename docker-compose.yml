@@ -1,0 +1,40 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: imposter_shield
+      POSTGRES_USER: shield
+      POSTGRES_PASSWORD: change_me
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports: ["5432:5432"]
+
+  redis:
+    image: redis:7
+    ports: ["6379:6379"]
+
+  api:
+    build: .
+    command: uvicorn imposter_shield.api:app --host 0.0.0.0 --port 8000
+    environment:
+      DATABASE_URL: postgresql+psycopg2://shield:change_me@db:5432/imposter_shield
+      REDIS_URL: redis://redis:6379/0
+    depends_on: [db, redis]
+    ports: ["8000:8000"]
+
+  worker:
+    build: .
+    # Verification + evidence assembly only. This worker never submits reports.
+    command: celery -A imposter_shield.worker.celery_app worker --loglevel=info
+    environment:
+      DATABASE_URL: postgresql+psycopg2://shield:change_me@db:5432/imposter_shield
+      REDIS_URL: redis://redis:6379/0
+      # SERPAPI_KEY / VT_API_KEY injected via secrets in real deployments
+    depends_on: [db, redis]
+
+  # NOTE: there is intentionally no headless "reporter" service.
+  # Report submission runs attended (report_assistant.prefill_and_handoff) on a
+  # reviewer's workstation in a headed browser, so a human submits each case.
+
+volumes:
+  pgdata:

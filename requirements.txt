@@ -1,0 +1,39 @@
+# ---- Web / API ----
+fastapi==0.112.2
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9          # OAuth2 form parsing
+pydantic==2.8.2
+pydantic-settings==2.4.0
+email-validator==2.2.0           # EmailStr
+
+# ---- Security ----
+PyJWT==2.9.0
+passlib[bcrypt]==1.7.4
+slowapi==0.1.9                   # rate limiting
+
+# ---- Persistence ----
+SQLAlchemy==2.0.32
+psycopg2-binary==2.9.9           # only needed for Postgres; SQLite works out of the box
+
+# ---- Evidence ----
+reportlab==4.2.2
+
+# ---- Verification (heavy; optional for the API to boot) ----
+sentence-transformers==3.0.1
+deepface==0.0.93
+opencv-python-headless==4.10.0.84
+Pillow==10.4.0
+numpy==1.26.4
+imagehash==4.3.1
+exifread==3.0.0
+
+# ---- Discovery / link triage ----
+google-search-results==2.4.2     # SerpApi
+requests==2.32.3
+
+# ---- Attended reporting (headed browser; human submits) ----
+playwright==1.46.0
+
+# ---- Async workers (optional) ----
+celery==5.4.0
+redis==5.0.8

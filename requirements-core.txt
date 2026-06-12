@@ -1,0 +1,16 @@
+# Minimal set to boot the API + frontend + scoring + dossier, WITHOUT the heavy
+# ML stack (torch/tensorflow). Face match and embedding similarity degrade
+# gracefully (lexical fallback) until you install the full requirements.txt.
+fastapi==0.112.2
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
+pydantic==2.8.2
+pydantic-settings==2.4.0
+email-validator==2.2.0
+PyJWT==2.9.0
+passlib[bcrypt]==1.7.4
+slowapi==0.1.9
+SQLAlchemy==2.0.32
+reportlab==4.2.2
+numpy==1.26.4
+requests==2.32.3
