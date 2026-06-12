@@ -19,10 +19,18 @@
     </form>
   </div>
 
-  <!-- App -->
+  <!-- App shell -->
   <div id="app-view" hidden>
     <header class="topbar">
       <div class="brand sm"><span class="shield">&#128737;</span> ImposterShield</div>
+
+      <!-- Tab navigation -->
+      <nav class="tab-nav" id="tab-nav">
+        <button class="tab-btn active" data-tab="cases">Cases</button>
+        <button class="tab-btn admin-only" data-tab="admin" hidden>Admin</button>
+      </nav>
+
+      <!-- Case filters (only shown on Cases tab) -->
       <nav class="filters" id="status-filters">
         <button data-status="" class="chip active">All</button>
         <button data-status="new" class="chip">New</button>
@@ -30,19 +38,81 @@
         <button data-status="submitted" class="chip">Submitted</button>
         <button data-status="dismissed" class="chip">Dismissed</button>
       </nav>
-      <div class="user-box"><span id="user-label"></span>
-        <button id="logout" class="btn ghost">Sign out</button></div>
+
+      <!-- Worker badge -->
+      <div id="worker-badge" class="worker-badge" title="Async worker status">
+        <span class="dot"></span> <span class="label">worker</span>
+      </div>
+
+      <div class="user-box">
+        <span id="user-label"></span>
+        <button id="logout" class="btn ghost">Sign out</button>
+      </div>
     </header>
 
-    <main class="layout">
+    <!-- Cases tab -->
+    <main class="layout" id="tab-cases">
       <section class="queue">
         <h2>Review queue</h2>
         <div id="case-list" class="case-list"></div>
       </section>
-
       <section class="detail" id="detail-panel">
         <div class="empty">Select a case to review its evidence.</div>
       </section>
+    </main>
+
+    <!-- Admin tab (admin role only) -->
+    <main class="admin-layout" id="tab-admin" hidden>
+      <div class="admin-panel">
+        <div class="admin-header">
+          <h2>Reviewer management</h2>
+          <button class="btn small primary" id="btn-new-user">+ Add reviewer</button>
+        </div>
+
+        <!-- Create / edit form (hidden until triggered) -->
+        <div id="user-form-wrap" class="card" hidden>
+          <h3 id="user-form-title">New reviewer</h3>
+          <div class="field">
+            <div class="row">
+              <label style="flex:1">Full name
+                <input id="uf-name" type="text" autocomplete="off" />
+              </label>
+              <label style="flex:1">Email
+                <input id="uf-email" type="email" autocomplete="off" />
+              </label>
+            </div>
+            <div class="row">
+              <label style="flex:1">Password (min 12 chars)
+                <input id="uf-password" type="password" autocomplete="new-password" />
+              </label>
+              <label style="flex:1">Role
+                <select id="uf-role">
+                  <option value="reviewer">Reviewer</option>
+                  <option value="viewer">Viewer</option>
+                  <option value="admin">Admin</option>
+                </select>
+              </label>
+            </div>
+            <div class="row">
+              <button class="btn small primary" id="btn-save-user">Save</button>
+              <button class="btn small" id="btn-cancel-user">Cancel</button>
+            </div>
+            <div id="user-form-error" class="error" hidden></div>
+          </div>
+        </div>
+
+        <!-- User table -->
+        <div class="card">
+          <h3>All accounts</h3>
+          <div id="user-table-wrap"></div>
+        </div>
+
+        <!-- Worker health -->
+        <div class="card">
+          <h3>Worker health</h3>
+          <div id="worker-health-detail" class="muted">Loading…</div>
+        </div>
+      </div>
     </main>
   </div>
 

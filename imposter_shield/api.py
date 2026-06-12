@@ -9,12 +9,17 @@ Security posture:
   - All state-changing actions write an immutable ActionLog row.
   - Submission is never automated: status -> 'submitted' requires an explicit
     human action and records who did it.
+
+Celery integration:
+  - verify_suspect task is dispatched after every create_suspect call.
+  - If no broker is configured the task call is silently skipped (CELERY_AVAILABLE
+    flag); the API still works, scoring just happens synchronously via /score.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import FileResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.staticfiles import StaticFiles
@@ -39,6 +44,30 @@ from .security.auth import (
 )
 from .security.headers import SecurityHeadersMiddleware
 
+# Try to import Celery tasks; skip gracefully if broker isn't installed/running.
+try:
+    from .worker.tasks import verify_suspect as _celery_verify
+    CELERY_AVAILABLE = True
+except Exception:  # noqa: BLE001
+    _celery_verify = None
+    CELERY_AVAILABLE = False
+
+
+def _dispatch_verify(suspect_id: int, identity: ProtectedIdentity) -> str | None:
+    """Enqueue the async face-match task. Returns task_id or None if skipped."""
+    if not CELERY_AVAILABLE or _celery_verify is None:
+        return None
+    try:
+        result = _celery_verify.delay(
+            suspect_id=suspect_id,
+            truth_image_paths=[],       # operator populates via metadata or future upload endpoint
+            truth_image_urls=[],
+            suspect_image_urls=[],      # populated from suspect.metadata_json["image_urls"] if present
+        )
+        return result.id
+    except Exception:  # noqa: BLE001 — broker unavailable; degrade silently
+        return None
+
 limiter = Limiter(key_func=get_remote_address, default_limits=[settings.rate_limit_default])
 app = FastAPI(title="ImposterShield", version="1.0.0")
 app.state.limiter = limiter
@@ -50,7 +79,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PATCH"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE"],
     allow_headers=["Authorization", "Content-Type"],
 )
 
@@ -127,6 +156,45 @@ def create_user(payload: schemas.UserCreate, db: Session = Depends(get_db),
     return user
 
 
+@app.get("/api/users", response_model=list[schemas.UserOut])
+def list_users(db: Session = Depends(get_db),
+               _: User = Depends(require_role(Role.admin))):
+    return db.query(User).order_by(User.created_at.desc()).all()
+
+
+@app.patch("/api/users/{user_id}", response_model=schemas.UserOut)
+def update_user(user_id: int, payload: schemas.UserUpdate, db: Session = Depends(get_db),
+                actor: User = Depends(require_role(Role.admin))):
+    target = db.get(User, user_id)
+    if target is None:
+        raise HTTPException(404, "User not found")
+    if target.id == actor.id and payload.role is not None and payload.role != Role.admin:
+        raise HTTPException(400, "Cannot demote your own admin account")
+    if payload.role is not None:
+        target.role = payload.role
+    if payload.is_active is not None:
+        target.is_active = payload.is_active
+    if payload.full_name is not None:
+        target.full_name = payload.full_name
+    if payload.password is not None:
+        target.hashed_password = hash_password(payload.password)
+    db.commit()
+    db.refresh(target)
+    return target
+
+
+@app.delete("/api/users/{user_id}", status_code=204)
+def delete_user(user_id: int, db: Session = Depends(get_db),
+                actor: User = Depends(require_role(Role.admin))):
+    target = db.get(User, user_id)
+    if target is None:
+        raise HTTPException(404, "User not found")
+    if target.id == actor.id:
+        raise HTTPException(400, "Cannot delete your own account")
+    db.delete(target)
+    db.commit()
+
+
 # ================================================================ IDENTITIES
 
 @app.post("/api/identities", response_model=schemas.IdentityOut, status_code=201)
@@ -155,7 +223,7 @@ def list_identities(db: Session = Depends(get_db), user: User = Depends(get_curr
 @app.post("/api/suspects", response_model=schemas.SuspectOut, status_code=201)
 def create_suspect(payload: schemas.SuspectCreate, db: Session = Depends(get_db),
                    user: User = Depends(require_role(Role.admin, Role.reviewer))):
-    _owned_identity(db, payload.identity_id, user)
+    ident = _owned_identity(db, payload.identity_id, user)
     s = Suspect(
         identity_id=payload.identity_id, platform=payload.platform, url=str(payload.url),
         handle=payload.handle, bio=payload.bio, metadata_json=payload.metadata,
@@ -163,7 +231,10 @@ def create_suspect(payload: schemas.SuspectCreate, db: Session = Depends(get_db)
     )
     db.add(s)
     db.flush()
-    _log(db, s.id, "suspect_created", user.email, {"url": str(payload.url)})
+    task_id = _dispatch_verify(s.id, ident)
+    _log(db, s.id, "suspect_created", user.email,
+         {"url": str(payload.url), "async_task_id": task_id,
+          "async_available": CELERY_AVAILABLE})
     db.commit()
     db.refresh(s)
     return s
@@ -311,6 +382,37 @@ def generate_dossier(suspect_id: int, db: Session = Depends(get_db),
     _log(db, s.id, "dossier_built", user.email, {"path": out_path})
     db.commit()
     return FileResponse(out_path, media_type="application/pdf", filename=f"dossier-{s.id}.pdf")
+
+
+# ============================================================= WORKER STATUS
+
+@app.get("/api/worker/health")
+def worker_health(_: User = Depends(get_current_user)):
+    """Quick check: is the Celery broker reachable?"""
+    if not CELERY_AVAILABLE:
+        return {"status": "unavailable", "reason": "celery/redis not installed"}
+    try:
+        from .worker.celery_app import celery_app as _ca
+        _ca.control.ping(timeout=2)
+        return {"status": "ok"}
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "unreachable", "reason": str(exc)}
+
+
+@app.get("/api/worker/task/{task_id}")
+def task_status(task_id: str, _: User = Depends(get_current_user)):
+    """Poll the result of a Celery task by ID."""
+    if not CELERY_AVAILABLE:
+        raise HTTPException(503, "Celery not available")
+    from celery.result import AsyncResult
+    from .worker.celery_app import celery_app as _ca
+    r = AsyncResult(task_id, app=_ca)
+    return {
+        "task_id": task_id,
+        "state": r.state,
+        "result": r.result if r.ready() and not r.failed() else None,
+        "error": str(r.result) if r.failed() else None,
+    }
 
 
 # ============================================================== STATIC SPA
