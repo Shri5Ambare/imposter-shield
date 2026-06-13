@@ -54,6 +54,7 @@ with TestClient(app) as client:
     check("admin login 200", r.status_code == 200)
     token = r.json()["access_token"]
     H = {"Authorization": f"Bearer {token}"}
+    admin_id = client.get("/api/me", headers=H).json()["id"]
 
     # 2. bad login is 401 + audited
     check("bad login 401",
@@ -120,7 +121,43 @@ with TestClient(app) as client:
     r = client.get(f"/api/cases/{sid}/audit", headers=H)
     check("case audit non-empty", r.status_code == 200 and len(r.json()) > 0)
 
-    # 11. logout revokes the token
+    # 11. RBAC — viewer cannot use write endpoints
+    r = client.post("/api/users", headers=H, json={
+        "email": "viewer@example.com", "full_name": "Viewer", "password": "viewerpass1234",
+        "role": "viewer"})
+    check("create viewer 201", r.status_code == 201)
+    view_token = client.post("/api/auth/token",
+        data={"username": "viewer@example.com", "password": "viewerpass1234"}).json()["access_token"]
+    VH = {"Authorization": f"Bearer {view_token}"}
+    check("viewer cannot create user (403)",
+          client.post("/api/users", headers=VH, json={
+              "email": "x@example.com", "full_name": "X", "password": "password1234567",
+              "role": "reviewer"}).status_code == 403)
+    check("viewer cannot create suspect (403)",
+          client.post("/api/suspects", headers=VH, json={
+              "identity_id": ident_id, "platform": "instagram",
+              "url": "https://example.com/z", "handle": "z", "bio": ""
+          }).status_code == 403)
+
+    # 12. RBAC — reviewer cannot access another user's cases (ownership isolation)
+    rev_token = client.post("/api/auth/token",
+        data={"username": "reviewer@example.com", "password": "reviewerpass123"}).json()["access_token"]
+    RH = {"Authorization": f"Bearer {rev_token}"}
+    check("reviewer cannot see admin case (404)",
+          client.get(f"/api/cases/{sid}", headers=RH).status_code == 404)
+
+    # 13. Self-protection — admin cannot delete or disable their own account
+    check("admin cannot delete self (400)",
+          client.delete(f"/api/users/{admin_id}", headers=H).status_code == 400)
+    check("admin cannot disable self (400)",
+          client.patch(f"/api/users/{admin_id}", headers=H,
+                       json={"is_active": False}).status_code == 400)
+
+    # 14. healthz no longer leaks env field
+    hz = client.get("/api/healthz").json()
+    check("healthz has no env field", "env" not in hz)
+
+    # 15. logout revokes the token
     check("logout 204", client.post("/api/auth/logout", headers=H).status_code == 204)
     check("revoked token rejected", client.get("/api/me", headers=H).status_code == 401)
 

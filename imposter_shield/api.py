@@ -20,6 +20,7 @@ Stringized annotations break FastAPI's signature resolution for endpoints wrappe
 by slowapi's @limiter.limit (forward refs like OAuth2PasswordRequestForm can't be
 resolved through the wrapper). Keep annotations concrete here.
 """
+from dataclasses import asdict
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
@@ -28,7 +29,6 @@ from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.staticfiles import StaticFiles
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
 from sqlalchemy.orm import Session
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -47,6 +47,10 @@ from .security.auth import (
     create_access_token, get_current_user, hash_password, require_role, verify_password,
 )
 from .security.headers import SecurityHeadersMiddleware
+
+# Pre-computed dummy hash keeps login response time constant when the email
+# doesn't exist — prevents username enumeration via timing side-channel.
+_DUMMY_HASH = hash_password("__timing_guard__")
 
 # Try to import Celery tasks; skip gracefully if broker isn't installed/running.
 try:
@@ -79,7 +83,24 @@ def _dispatch_verify(suspect: Suspect, identity: ProtectedIdentity) -> str | Non
     except Exception:  # noqa: BLE001 — broker unavailable; degrade silently
         return None
 
-limiter = Limiter(key_func=get_remote_address, default_limits=[settings.rate_limit_default])
+def _real_ip(request: Request) -> str:
+    """Client IP for rate limiting and audit logging.
+
+    With trusted_proxy_depth=0 (default/direct) uses request.client.host.
+    With trusted_proxy_depth=1 (one reverse proxy in front, e.g. nginx that
+    sets X-Forwarded-For: $remote_addr) reads the leftmost XFF entry.
+    Only raise this above 0 when you have a controlled reverse proxy.
+    """
+    depth = settings.trusted_proxy_depth
+    if depth > 0:
+        xff = request.headers.get("X-Forwarded-For", "")
+        parts = [p.strip() for p in xff.split(",") if p.strip()]
+        if parts:
+            return parts[0]  # leftmost = original client when proxy uses $remote_addr
+    return request.client.host if request.client else "unknown"
+
+
+limiter = Limiter(key_func=_real_ip, default_limits=[settings.rate_limit_default])
 app = FastAPI(title="ImposterShield", version="1.0.0")
 app.state.limiter = limiter
 
@@ -115,7 +136,7 @@ def _log(db: Session, suspect_id: int, action: str, actor: str, detail: dict | N
 
 
 def _client_ip(request: Request) -> str:
-    return request.client.host if request.client else ""
+    return _real_ip(request)
 
 
 def _audit(db: Session, request: Request, category: str, action: str, *,
@@ -157,8 +178,10 @@ def _owned_suspect(db: Session, suspect_id: int, user: User) -> Suspect:
 def login(request: Request, form: OAuth2PasswordRequestForm = Depends(),
           db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == form.username).first()
-    # Constant-ish path: verify even when user missing to blunt user enumeration.
-    if user is None or not verify_password(form.password, user.hashed_password):
+    # Always call verify_password (even when user is None) to keep response time
+    # constant and prevent username enumeration via timing side-channel.
+    password_ok = verify_password(form.password, user.hashed_password if user else _DUMMY_HASH)
+    if not user or not password_ok:
         _audit(db, request, "auth", "login_failed", actor=form.username,
                detail={"reason": "bad_credentials"})
         db.commit()
@@ -382,7 +405,7 @@ def case_detail(suspect_id: int, db: Session = Depends(get_db),
     detail = schemas.CaseDetail.model_validate(s)
     detail.latest_score = schemas.ScoreOut.model_validate(latest) if latest else None
     detail.harm = [schemas.HarmEvidenceOut.model_validate(h) for h in s.harm]
-    detail.recommendations = [r.__dict__ for r in recs]
+    detail.recommendations = [asdict(r) for r in recs]
     return detail
 
 
@@ -489,7 +512,7 @@ def generate_dossier(request: Request, suspect_id: int, db: Session = Depends(ge
 @app.get("/api/healthz")
 def healthz():
     """Unauthenticated liveness probe for load balancers / container healthchecks."""
-    return {"status": "ok", "service": "imposter-shield", "env": settings.environment}
+    return {"status": "ok", "service": "imposter-shield"}
 
 
 # ============================================================= WORKER STATUS
@@ -515,11 +538,18 @@ def task_status(task_id: str, _: User = Depends(get_current_user)):
     from celery.result import AsyncResult
     from .worker.celery_app import celery_app as _ca
     r = AsyncResult(task_id, app=_ca)
+    safe_result = None
+    if r.ready() and not r.failed():
+        raw = r.result
+        if isinstance(raw, dict):
+            # Whitelist only safe fields — never expose internal paths or model details.
+            safe_result = {k: raw[k] for k in ("suspect_id", "confidence", "enters_review")
+                           if k in raw}
     return {
         "task_id": task_id,
         "state": r.state,
-        "result": r.result if r.ready() and not r.failed() else None,
-        "error": str(r.result) if r.failed() else None,
+        "result": safe_result,
+        "error": "Task failed" if r.failed() else None,
     }
 
 

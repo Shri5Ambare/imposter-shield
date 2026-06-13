@@ -200,7 +200,7 @@ function renderDetail(c) {
         <span class="score-big">${pct}%</span>
         <span>${score?.enters_review ? "enters review queue" : "below threshold"}</span>
       </div>
-      <div class="bar"><span style="width:${pct}%"></span></div>
+      <div class="bar"><span id="bar-fill"></span></div>
       <div class="kv">${breakdownRows || "<div>Not scored yet.</div>"}</div>
       <div class="actions">
         <button class="btn small" id="btn-score">Run / re-score</button>
@@ -214,9 +214,9 @@ function renderDetail(c) {
     <div class="card">
       <h3>Harm evidence</h3>
       ${harmHtml}
-      <div class="field" style="margin-top:14px;">
+      <div class="field harm-evidence">
         <div class="row">
-          <select id="harm-kind" style="max-width:180px;">
+          <select id="harm-kind" class="narrow">
             <option value="financial_scam">Financial scam</option>
             <option value="phishing">Phishing link</option>
             <option value="defamation">Defamation</option>
@@ -247,6 +247,10 @@ function renderDetail(c) {
       <div class="handoff-note">
         Submission is a manual human action and is recorded against your account.</div>
     </div>`;
+
+  // Set bar width via JS (not inline HTML style) so CSP style-src 'self' is satisfied.
+  const barFill = document.getElementById("bar-fill");
+  if (barFill) barFill.style.width = `${pct}%`;
 
   document.getElementById("btn-score").addEventListener("click", () => scoreCase(c.id));
   document.getElementById("btn-add-harm").addEventListener("click", () => addHarm(c.id));
@@ -347,8 +351,7 @@ function renderUserTable(users) {
                 ? `<button class="btn small btn-toggle-user" data-uid="${u.id}"
                      data-active="${u.is_active}">
                      ${u.is_active ? "Disable" : "Enable"}</button>
-                   <button class="btn small btn-del-user" data-uid="${u.id}"
-                     style="color:var(--crit)">Delete</button>`
+                   <button class="btn small danger btn-del-user" data-uid="${u.id}">Delete</button>`
                 : `<span class="muted">(you)</span>`}
             </div></td>
           </tr>`).join("")}

@@ -13,7 +13,7 @@ from starlette.responses import Response
 _CSP = (
     "default-src 'self'; "
     "img-src 'self' data: https:; "
-    "style-src 'self' 'unsafe-inline'; "   # inline styles in index.html only
+    "style-src 'self'; "
     "script-src 'self'; "
     "connect-src 'self'; "
     "object-src 'none'; "

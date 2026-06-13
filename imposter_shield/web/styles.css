@@ -153,3 +153,13 @@ input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent); bo
 .badge.active { background: rgba(63,185,80,.1); color: var(--ok); }
 .badge.inactive { background: rgba(248,81,73,.1); color: var(--crit); }
 .muted { color: var(--muted); font-size: 13px; }
+
+/* --- inline-style replacements (unsafe-inline removed from CSP) --- */
+/* Labels inside .row get flex:1 so the pair fills the row equally */
+.row label { flex: 1; }
+/* Extra top margin on the harm-evidence form section */
+.harm-evidence { margin-top: 14px; }
+/* Narrow select for harm kind picker */
+select.narrow { max-width: 180px; }
+/* Danger text button (e.g. Delete) */
+.btn.danger { color: var(--crit); border-color: rgba(248, 81, 73, .4); }

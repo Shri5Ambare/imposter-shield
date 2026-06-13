@@ -13,7 +13,6 @@ COPY requirements-core.txt .
 RUN pip install -r requirements-core.txt
 
 COPY imposter_shield ./imposter_shield
-COPY seed.py example.py ./
 
 # Run as an unprivileged user.
 RUN useradd --create-home --uid 10001 appuser && chown -R appuser /app

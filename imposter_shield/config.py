@@ -43,6 +43,12 @@ class Settings(BaseSettings):
     # resolve to private/loopback/link-local addresses. Flip only for testing.
     allow_private_network_urls: bool = False
 
+    # Reverse-proxy trust depth for rate-limit / audit IP extraction.
+    # 0 = no proxy (use request.client.host directly).
+    # 1 = one trusted proxy (e.g. nginx); reads the leftmost X-Forwarded-For value.
+    # Only set > 0 if you have a trusted reverse proxy that sets X-Forwarded-For.
+    trusted_proxy_depth: int = 0
+
     # --- image ingestion limits (worker) -----------------------------------
     image_max_bytes: int = 25 * 1024 * 1024     # 25 MB hard cap per download
     image_download_timeout: int = 15            # seconds per image

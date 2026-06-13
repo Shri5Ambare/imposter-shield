@@ -1,0 +1,36 @@
+# Keep the Docker build context clean — never send secrets or dev artefacts to the daemon.
+
+# Secrets and local config
+.env
+*.env
+.env.*
+
+# Dev / test artefacts
+seed.py
+example.py
+tests/
+*.db
+*.sqlite
+
+# Version control
+.git
+.gitignore
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# IDE / OS
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db
+
+# Generated outputs (mounted at runtime, not baked in)
+out/
